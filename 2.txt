@@ -1,0 +1,78 @@
+// ===== Main Handler =====
+async function handleUpdate(update, kv) {
+  if (!update.message) return;
+  
+  const message = update.message;
+  const chatId = message.chat.id;
+  const userId = message.from.id;
+  const text = message.text || "";
+  
+  if (text !== "/start") {
+    const authorized = await isAuthorized(userId, kv);
+    if (!authorized) {
+      await sendMessage(chatId, "❌ You are not authorized to use this bot.\nContact the owner for access.");
+      return;
+    }
+  }
+  
+  const parts = text.split(" ");
+  const command = parts[0].toLowerCase();
+  const args = parts.slice(1);
+  
+  switch (command) {
+    case "/start":
+      await handleStart(chatId, kv);
+      break;
+    case "/new":
+      await handleNewProject(chatId, args, userId, kv);
+      break;
+    case "/list":
+      await handleListProjects(chatId, userId, kv);
+      break;
+    case "/info":
+      await handleProjectInfo(chatId, args, userId, kv);
+      break;
+    case "/delete":
+      await handleDeleteProject(chatId, args, userId, kv);
+      break;
+    case "/adduser":
+      await handleAddUser(chatId, args, userId, kv);
+      break;
+    case "/removeuser":
+      await handleRemoveUser(chatId, args, userId, kv);
+      break;
+    case "/users":
+      await handleListUsers(chatId, userId, kv);
+      break;
+    default:
+      await sendMessage(chatId, "❌ Unknown command. Use /start to see available commands.");
+  }
+}
+
+// ===== Cloudflare Worker Entry Point =====
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    
+    if (url.pathname === "/webhook" && request.method === "POST") {
+      const update = await request.json();
+      await handleUpdate(update, env.GCP_DENO_KV);
+      return new Response("OK", { status: 200 });
+    }
+    
+    if (url.pathname === "/setwebhook") {
+      const webhookUrl = `https://${url.hostname}/webhook`;
+      const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook?url=${webhookUrl}`);
+      const result = await response.json();
+      return new Response(JSON.stringify(result), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    
+    if (url.pathname === "/") {
+      return new Response("GCP Deno Bot is running! Created by မောင်သုည", { status: 200 });
+    }
+    
+    return new Response("Not found", { status: 404 });
+  }
+};
