@@ -1,0 +1,860 @@
+// ========================
+// GCP Deno Bot by မောင်သုည
+// Auto-create Deno Deploy Projects with VLESS Config
+// ========================
+
+// ===== CONFIGURATION =====
+const BOT_TOKEN = "7994671325:AAH4AwA-vcKj5KVbyYH1ljpNWMSE9QxQkMc";
+const OWNER_ID = 7576434717;
+const DENO_API_TOKEN = "ddo_DbD6pfJNlqejahh0ntp1MlLxhPTTl8hanprp";
+const DENO_ORGANIZATION = "zawtunwai";
+
+// ===== Helper Functions =====
+async function sendMessage(chatId, text, parseMode = null) {
+  const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
+  const body = {
+    chat_id: chatId,
+    text: text,
+    disable_web_page_preview: true
+  };
+  if (parseMode) body.parse_mode = parseMode;
+  
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  return response.json();
+}
+
+function generateUUID() {
+  return crypto.randomUUID();
+}
+
+function generateProjectName(baseName) {
+  const cleanName = baseName.toLowerCase().replace(/[^a-z0-9-]/g, "");
+  const random = Math.random().toString(36).substring(2, 6);
+  return `${cleanName}-${random}`;
+}
+
+// ===== Deno Deploy API Functions =====
+async function createDenoProject(projectName) {
+  const url = `https://api.deno.com/v1/organizations/${DENO_ORGANIZATION}/projects`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${DENO_API_TOKEN}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      name: projectName
+    })
+  });
+  
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Failed to create project: ${error}`);
+  }
+  
+  return await response.json();
+}
+
+function getMainTemplate(uuid, credit) {
+  return `import { exists } from "https://deno.land/std/fs/exists.ts";
+
+const envUUID = Deno.env.get('UUID') || '${uuid}';
+const proxyIP = Deno.env.get('PROXYIP') || '';
+const credit = Deno.env.get('CREDIT') || '${credit}';
+
+const CONFIG_FILE = 'config.json';
+
+interface Config {
+  uuid?: string;
+}
+
+async function getUUIDFromConfig(): Promise<string | undefined> {
+  if (await exists(CONFIG_FILE)) {
+    try {
+      const configText = await Deno.readTextFile(CONFIG_FILE);
+      const config: Config = JSON.parse(configText);
+      if (config.uuid && isValidUUID(config.uuid)) {
+        console.log(\`Loaded UUID from \${CONFIG_FILE}: \${config.uuid}\`);
+        return config.uuid;
+      }
+    } catch (e) {
+      console.warn(\`Error reading or parsing \${CONFIG_FILE}:\`, e.message);
+    }
+  }
+  return undefined;
+}
+
+async function saveUUIDToConfig(uuid: string): Promise<void> {
+  try {
+    const config: Config = { uuid: uuid };
+    await Deno.writeTextFile(CONFIG_FILE, JSON.stringify(config, null, 2));
+    console.log(\`Saved new UUID to \${CONFIG_FILE}: \${uuid}\`);
+  } catch (e) {
+    console.error(\`Failed to save UUID to \${CONFIG_FILE}:\`, e.message);
+  }
+}
+
+let userID: string;
+
+if (envUUID && isValidUUID(envUUID)) {
+  userID = envUUID;
+  console.log(\`Using UUID from environment: \${userID}\`);
+} else {
+  const configUUID = await getUUIDFromConfig();
+  if (configUUID) {
+    userID = configUUID;
+  } else {
+    userID = crypto.randomUUID();
+    console.log(\`Generated new UUID: \${userID}\`);
+    await saveUUIDToConfig(userID);
+  }
+}
+
+if (!isValidUUID(userID)) {
+  throw new Error('uuid is not valid');
+}
+
+console.log(Deno.version);
+console.log(\`Final UUID in use: \${userID}\`);
+
+Deno.serve(async (request: Request) => {
+  const upgrade = request.headers.get('upgrade') || '';
+  if (upgrade.toLowerCase() != 'websocket') {
+    const url = new URL(request.url);
+    switch (url.pathname) {
+      case '/': {
+        const htmlContent = \`
+<!DOCTYPE html>
+<html>
+<head><title>Deno Proxy</title></head>
+<body style="font-family:Arial;text-align:center;padding:50px">
+<h1>🚀 Deno Proxy Online!</h1>
+<p>Your VLESS over WebSocket proxy is running.</p>
+<a href="/\${userID}" style="background:#007bff;color:white;padding:10px 20px;text-decoration:none;border-radius:5px">Get Config</a>
+</body>
+</html>\`;
+        return new Response(htmlContent, {
+          headers: { 'Content-Type': 'text/html; charset=utf-8' },
+        });
+      }
+      case \`/\${userID}\`: {
+        const hostName = url.hostname;
+        const port = url.port || 443;
+        const vlessMain = \`vless://\${userID}@\${hostName}:\${port}?encryption=none&security=tls&sni=\${hostName}&fp=randomized&type=ws&host=\${hostName}&path=%2F%3Fed%3D2048#\${credit}\`;
+        
+        const clashMetaConfig = \`
+- type: vless
+  name: \${hostName}
+  server: \${hostName}
+  port: \${port}
+  uuid: \${userID}
+  network: ws
+  tls: true
+  sni: \${hostName}
+  client-fingerprint: chrome
+  ws-opts:
+    path: "/?ed=2048"
+    headers:
+      host: \${hostName}
+\`;
+
+        const htmlConfigContent = \`
+<!DOCTYPE html>
+<html>
+<head><title>VLESS Config</title></head>
+<body style="font-family:Arial;padding:20px">
+<h1>🔑 Your VLESS Configuration</h1>
+<h2>VLESS URI</h2>
+<pre style="background:#f0f0f0;padding:10px;border-radius:5px">\${vlessMain}</pre>
+<h2>Clash-Meta</h2>
+<pre style="background:#f0f0f0;padding:10px;border-radius:5px">\${clashMetaConfig}</pre>
+<p>Config URL: https://\${hostName}/\${userID}</p>
+</body>
+</html>\`;
+        return new Response(htmlConfigContent, {
+          status: 200,
+          headers: { 'Content-Type': 'text/html; charset=utf-8' },
+        });
+      }
+      default:
+        return new Response('Not found', { status: 404 });
+    }
+  } else {
+    return await vlessOverWSHandler(request);
+  }
+});
+
+async function vlessOverWSHandler(request: Request) {
+  const { socket, response } = Deno.upgradeWebSocket(request);
+  let address = '';
+  let portWithRandomLog = '';
+  const log = (info: string, event = '') => {
+    console.log(\`[\${address}:\${portWithRandomLog}] \${info}\`, event);
+  };
+  const earlyDataHeader = request.headers.get('sec-websocket-protocol') || '';
+  const readableWebSocketStream = makeReadableWebSocketStream(socket, earlyDataHeader, log);
+  let remoteSocketWapper: any = { value: null };
+  let udpStreamWrite: any = null;
+  let isDns = false;
+
+  readableWebSocketStream
+    .pipeTo(
+      new WritableStream({
+        async write(chunk, controller) {
+          if (isDns && udpStreamWrite) {
+            return udpStreamWrite(chunk);
+          }
+          if (remoteSocketWapper.value) {
+            const writer = remoteSocketWapper.value.writable.getWriter();
+            await writer.write(new Uint8Array(chunk));
+            writer.releaseLock();
+            return;
+          }
+
+          const {
+            hasError,
+            message,
+            portRemote = 443,
+            addressRemote = '',
+            rawDataIndex,
+            vlessVersion = new Uint8Array([0, 0]),
+            isUDP,
+          } = processVlessHeader(chunk, userID);
+          address = addressRemote;
+          portWithRandomLog = \`\${portRemote}--\${Math.random()} \${isUDP ? 'udp ' : 'tcp '}\`;
+          if (hasError) {
+            throw new Error(message);
+          }
+          if (isUDP) {
+            if (portRemote === 53) {
+              isDns = true;
+            } else {
+              throw new Error('UDP proxy only enable for DNS which is port 53');
+            }
+          }
+
+          const vlessResponseHeader = new Uint8Array([vlessVersion[0], 0]);
+          const rawClientData = chunk.slice(rawDataIndex);
+
+          if (isDns) {
+            console.log('isDns:', isDns);
+            const { write } = await handleUDPOutBound(socket, vlessResponseHeader, log);
+            udpStreamWrite = write;
+            udpStreamWrite(rawClientData);
+            return;
+          }
+          handleTCPOutBound(
+            remoteSocketWapper,
+            addressRemote,
+            portRemote,
+            rawClientData,
+            socket,
+            vlessResponseHeader,
+            log
+          );
+        },
+        close() {
+          log(\`readableWebSocketStream is close\`);
+        },
+        abort(reason) {
+          log(\`readableWebSocketStream is abort\`, JSON.stringify(reason));
+        },
+      })
+    )
+    .catch((err) => {
+      log('readableWebSocketStream pipeTo error', err);
+    });
+
+  return response;
+}
+
+async function handleTCPOutBound(
+  remoteSocket: { value: any },
+  addressRemote: string,
+  portRemote: number,
+  rawClientData: Uint8Array,
+  webSocket: WebSocket,
+  vlessResponseHeader: Uint8Array,
+  log: (info: string, event?: string) => void
+) {
+  async function connectAndWrite(address: string, port: number) {
+    const tcpSocket = await Deno.connect({
+      port: port,
+      hostname: address,
+    });
+    remoteSocket.value = tcpSocket;
+    log(\`connected to \${address}:\${port}\`);
+    const writer = tcpSocket.writable.getWriter();
+    await writer.write(new Uint8Array(rawClientData));
+    writer.releaseLock();
+    return tcpSocket;
+  }
+
+  async function retry() {
+    const tcpSocket = await connectAndWrite(proxyIP || addressRemote, portRemote);
+    remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, null, log);
+  }
+
+  const tcpSocket = await connectAndWrite(addressRemote, portRemote);
+  remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, retry, log);
+}
+
+function makeReadableWebSocketStream(webSocketServer: WebSocket, earlyDataHeader: string, log: (info: string, event?: string) => void) {
+  let readableStreamCancel = false;
+  const stream = new ReadableStream({
+    start(controller) {
+      webSocketServer.addEventListener('message', (event) => {
+        if (readableStreamCancel) return;
+        controller.enqueue(event.data);
+      });
+      webSocketServer.addEventListener('close', () => {
+        safeCloseWebSocket(webSocketServer);
+        if (readableStreamCancel) return;
+        controller.close();
+      });
+      webSocketServer.addEventListener('error', (err) => {
+        log('webSocketServer has error');
+        controller.error(err);
+      });
+      const { earlyData, error } = base64ToArrayBuffer(earlyDataHeader);
+      if (error) {
+        controller.error(error);
+      } else if (earlyData) {
+        controller.enqueue(earlyData);
+      }
+    },
+    cancel(reason) {
+      if (readableStreamCancel) return;
+      log(\`ReadableStream was canceled, due to \${reason}\`);
+      readableStreamCancel = true;
+      safeCloseWebSocket(webSocketServer);
+    },
+  });
+  return stream;
+}
+
+function processVlessHeader(vlessBuffer: ArrayBuffer, userID: string) {
+  if (vlessBuffer.byteLength < 24) {
+    return { hasError: true, message: 'invalid data' };
+  }
+  const version = new Uint8Array(vlessBuffer.slice(0, 1));
+  let isValidUser = false;
+  let isUDP = false;
+  
+  const receivedUUID = stringify(new Uint8Array(vlessBuffer.slice(1, 17)));
+  
+  if (receivedUUID === userID) {
+    isValidUser = true;
+  }
+  
+  if (!isValidUser) {
+    return { hasError: true, message: 'invalid user' };
+  }
+
+  const optLength = new Uint8Array(vlessBuffer.slice(17, 18))[0];
+  const command = new Uint8Array(vlessBuffer.slice(18 + optLength, 18 + optLength + 1))[0];
+
+  if (command === 1) {
+  } else if (command === 2) {
+    isUDP = true;
+  } else {
+    return { hasError: true, message: \`command \${command} is not support\` };
+  }
+  const portIndex = 18 + optLength + 1;
+  const portBuffer = vlessBuffer.slice(portIndex, portIndex + 2);
+  const portRemote = new DataView(portBuffer).getUint16(0);
+
+  let addressIndex = portIndex + 2;
+  const addressBuffer = new Uint8Array(vlessBuffer.slice(addressIndex, addressIndex + 1));
+  const addressType = addressBuffer[0];
+  let addressLength = 0;
+  let addressValueIndex = addressIndex + 1;
+  let addressValue = '';
+  switch (addressType) {
+    case 1:
+      addressLength = 4;
+      addressValue = new Uint8Array(vlessBuffer.slice(addressValueIndex, addressValueIndex + addressLength)).join('.');
+      break;
+    case 2:
+      addressLength = new Uint8Array(vlessBuffer.slice(addressValueIndex, addressValueIndex + 1))[0];
+      addressValueIndex += 1;
+      addressValue = new TextDecoder().decode(vlessBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
+      break;
+    case 3:
+      addressLength = 16;
+      const dataView = new DataView(vlessBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
+      const ipv6: string[] = [];
+      for (let i = 0; i < 8; i++) {
+        ipv6.push(dataView.getUint16(i * 2).toString(16));
+      }
+      addressValue = ipv6.join(':');
+      break;
+    default:
+      return { hasError: true, message: \`invalid addressType is \${addressType}\` };
+  }
+  if (!addressValue) {
+    return { hasError: true, message: \`addressValue is empty\` };
+  }
+
+  return {
+    hasError: false,
+    addressRemote: addressValue,
+    addressType,
+    portRemote,
+    rawDataIndex: addressValueIndex + addressLength,
+    vlessVersion: version,
+    isUDP,
+  };
+}
+
+async function remoteSocketToWS(remoteSocket: Deno.TcpConn, webSocket: WebSocket, vlessResponseHeader: Uint8Array, retry: (() => Promise<void>) | null, log: (info: string, event?: string) => void) {
+  let hasIncomingData = false;
+  await remoteSocket.readable
+    .pipeTo(
+      new WritableStream({
+        async write(chunk, controller) {
+          hasIncomingData = true;
+          if (webSocket.readyState !== WS_READY_STATE_OPEN) {
+            controller.error('webSocket.readyState is not open');
+          }
+          if (vlessResponseHeader) {
+            webSocket.send(new Uint8Array([...vlessResponseHeader, ...chunk]));
+            vlessResponseHeader = null;
+          } else {
+            webSocket.send(chunk);
+          }
+        },
+        close() {
+          log(\`remoteConnection!.readable is close with hasIncomingData is \${hasIncomingData}\`);
+        },
+        abort(reason) {
+          console.error(\`remoteConnection!.readable abort\`, reason);
+        },
+      })
+    )
+    .catch((error) => {
+      console.error(\`remoteSocketToWS has exception \`, error.stack || error);
+      safeCloseWebSocket(webSocket);
+    });
+
+  if (hasIncomingData === false && retry) {
+    log(\`retry\`);
+    retry();
+  }
+}
+
+function base64ToArrayBuffer(base64Str: string) {
+  if (!base64Str) return { error: null };
+  try {
+    base64Str = base64Str.replace(/-/g, '+').replace(/_/g, '/');
+    const decode = atob(base64Str);
+    const arryBuffer = Uint8Array.from(decode, (c) => c.charCodeAt(0));
+    return { earlyData: arryBuffer.buffer, error: null };
+  } catch (error) {
+    return { error: error };
+  }
+}
+
+function isValidUUID(uuid: string): boolean {
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[4][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  return uuidRegex.test(uuid);
+}
+
+const WS_READY_STATE_OPEN = 1;
+const WS_READY_STATE_CLOSING = 2;
+
+function safeCloseWebSocket(socket: WebSocket) {
+  try {
+    if (socket.readyState === WS_READY_STATE_OPEN || socket.readyState === WS_READY_STATE_CLOSING) {
+      socket.close();
+    }
+  } catch (error) {
+    console.error('safeCloseWebSocket error', error);
+  }
+}
+
+const byteToHex: string[] = [];
+for (let i = 0; i < 256; ++i) {
+  byteToHex.push((i + 256).toString(16).slice(1));
+}
+function unsafeStringify(arr: Uint8Array, offset = 0) {
+  return (
+    byteToHex[arr[offset + 0]] +
+    byteToHex[arr[offset + 1]] +
+    byteToHex[arr[offset + 2]] +
+    byteToHex[arr[offset + 3]] +
+    '-' +
+    byteToHex[arr[offset + 4]] +
+    byteToHex[arr[offset + 5]] +
+    '-' +
+    byteToHex[arr[offset + 6]] +
+    byteToHex[arr[offset + 7]] +
+    '-' +
+    byteToHex[arr[offset + 8]] +
+    byteToHex[arr[offset + 9]] +
+    '-' +
+    byteToHex[arr[offset + 10]] +
+    byteToHex[arr[offset + 11]] +
+    byteToHex[arr[offset + 12]] +
+    byteToHex[arr[offset + 13]] +
+    byteToHex[arr[offset + 14]] +
+    byteToHex[arr[offset + 15]]
+  ).toLowerCase();
+}
+function stringify(arr: Uint8Array, offset = 0) {
+  const uuid = unsafeStringify(arr, offset);
+  if (!isValidUUID(uuid)) {
+    throw TypeError('Stringified UUID is invalid');
+  }
+  return uuid;
+}
+
+async function handleUDPOutBound(webSocket: WebSocket, vlessResponseHeader: Uint8Array, log: (info: string) => void) {
+  let isVlessHeaderSent = false;
+  const transformStream = new TransformStream({
+    transform(chunk, controller) {
+      for (let index = 0; index < chunk.byteLength;) {
+        const lengthBuffer = chunk.slice(index, index + 2);
+        const udpPakcetLength = new DataView(lengthBuffer).getUint16(0);
+        const udpData = new Uint8Array(chunk.slice(index + 2, index + 2 + udpPakcetLength));
+        index = index + 2 + udpPakcetLength;
+        controller.enqueue(udpData);
+      }
+    },
+  });
+
+  transformStream.readable
+    .pipeTo(
+      new WritableStream({
+        async write(chunk) {
+          const resp = await fetch('https://1.1.1.1/dns-query', {
+            method: 'POST',
+            headers: { 'content-type': 'application/dns-message' },
+            body: chunk,
+          });
+          const dnsQueryResult = await resp.arrayBuffer();
+          const udpSize = dnsQueryResult.byteLength;
+          const udpSizeBuffer = new Uint8Array([(udpSize >> 8) & 0xff, udpSize & 0xff]);
+          if (webSocket.readyState === WS_READY_STATE_OPEN) {
+            log(\`doh success and dns message length is \${udpSize}\`);
+            if (isVlessHeaderSent) {
+              webSocket.send(await new Blob([udpSizeBuffer, dnsQueryResult]).arrayBuffer());
+            } else {
+              webSocket.send(await new Blob([vlessResponseHeader, udpSizeBuffer, dnsQueryResult]).arrayBuffer());
+              isVlessHeaderSent = true;
+            }
+          }
+        },
+      })
+    )
+    .catch((error) => {
+      log('dns udp has error' + error);
+    });
+
+  const writer = transformStream.writable.getWriter();
+
+  return {
+    write(chunk: Uint8Array) {
+      writer.write(chunk);
+    },
+  };
+}
+`;
+
+// ===== User Management (KV) =====
+async function isAuthorized(userId, kv) {
+  if (userId === OWNER_ID) return true;
+  const allowed = await kv.get(`allowed:${userId}`);
+  return allowed.value === true;
+}
+
+async function addAllowedUser(userId, kv) {
+  await kv.put(`allowed:${userId}`, true);
+}
+
+async function removeAllowedUser(userId, kv) {
+  await kv.put(`allowed:${userId}`, false);
+}
+
+async function getAllowedUsers(kv) {
+  const list = await kv.list({ prefix: "allowed:" });
+  const users = [];
+  for await (const key of list) {
+    const userId = key.name.replace("allowed:", "");
+    if (userId && !isNaN(parseInt(userId))) {
+      users.push(parseInt(userId));
+    }
+  }
+  return users;
+}
+
+async function saveUserProject(userId, projectName, uuid, url, kv) {
+  const projectData = {
+    projectName: projectName,
+    uuid: uuid,
+    url: url,
+    createdAt: Date.now(),
+    configUrl: `${url}/${uuid}`
+  };
+  await kv.put(`user:${userId}:project:${projectName}`, JSON.stringify(projectData));
+}
+
+async function getUserProjects(userId, kv) {
+  const projects = [];
+  const list = await kv.list({ prefix: `user:${userId}:project:` });
+  for await (const key of list) {
+    const data = await kv.get(key.name);
+    if (data.value) {
+      projects.push(JSON.parse(data.value));
+    }
+  }
+  return projects;
+}
+
+async function deleteUserProject(userId, projectName, kv) {
+  await kv.delete(`user:${userId}:project:${projectName}`);
+}
+
+// ===== Command Handlers =====
+async function handleStart(chatId, kv) {
+  const welcomeMsg = `🚀 *GCP Deno Proxy Bot* by မောင်သုည
+
+ဒီ Bot က Deno Deploy ပေါ်မှာ VLESS Proxy Project အသစ်တွေ အလိုအလျောက် ဖန်တီးပေးပါတယ်။
+
+📌 *Commands:*
+
+/new <name> <limitGB> <days> - Project အသစ်ဖန်တီးရန်
+/list - ကိုယ်ပိုင် Project စာရင်း
+/info <projectName> - Project အသေးစိတ်
+/delete <projectName> - Project ဖျက်ရန်
+
+👑 *Owner Commands:*
+/adduser <id> - user ထည့်ရန်
+/removeuser <id> - user ဖျက်ရန်
+/users - user စာရင်း
+
+⚡ *Example:*
+/new myserver 100 30
+
+*Note:* Project name can only contain letters, numbers, and hyphens.`;
+
+  await sendMessage(chatId, welcomeMsg, "Markdown");
+}
+
+async function handleNewProject(chatId, args, userId, kv) {
+  if (args.length < 3) {
+    await sendMessage(chatId, "❌ Usage: /new <projectName> <limitGB> <days>\n\nExample: /new myserver 100 30");
+    return;
+  }
+  
+  const baseName = args[0];
+  const limitGB = parseInt(args[1]);
+  const days = parseInt(args[2]);
+  
+  const projectName = generateProjectName(baseName);
+  
+  if (isNaN(limitGB) || limitGB < 1 || limitGB > 1000) {
+    await sendMessage(chatId, "❌ Limit must be between 1-1000 GB");
+    return;
+  }
+  
+  if (isNaN(days) || days < 1 || days > 365) {
+    await sendMessage(chatId, "❌ Days must be between 1-365");
+    return;
+  }
+  
+  await sendMessage(chatId, "🔄 Creating your Deno project... Please wait (30-60 seconds)");
+  
+  try {
+    const uuid = generateUUID();
+    const credit = `User-${userId}`;
+    
+    await createDenoProject(projectName);
+    
+    const code = getMainTemplate(uuid, credit);
+    const codeBase64 = btoa(unescape(encodeURIComponent(code)));
+    
+    const deployUrl = `https://api.deno.com/v1/organizations/${DENO_ORGANIZATION}/projects/${projectName}/deployments`;
+    await fetch(deployUrl, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${DENO_API_TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        entrypoint: "main.ts",
+        assets: {
+          "main.ts": {
+            kind: "file",
+            content: codeBase64,
+            encoding: "base64"
+          }
+        },
+        envVars: {
+          "UUID": uuid,
+          "CREDIT": credit
+        }
+      })
+    });
+    
+    const projectUrl = `https://${projectName}.deno.dev`;
+    const configUrl = `${projectUrl}/${uuid}`;
+    const vlessUri = `vless://${uuid}@${projectName}.deno.dev:443?encryption=none&security=tls&sni=${projectName}.deno.dev&fp=randomized&type=ws&host=${projectName}.deno.dev&path=%2F%3Fed%3D2048#${credit}`;
+    
+    await saveUserProject(userId, projectName, uuid, projectUrl, kv);
+    
+    const successMsg = `✅ *Project Created Successfully!*
+
+📁 *Project Name:* ${projectName}
+🆔 *UUID:* \`${uuid}\`
+📊 *Limit:* ${limitGB} GB
+⏰ *Expiry:* ${days} days
+
+🔗 *Config URL:* ${configUrl}
+🔗 *VLESS URI:*
+\`${vlessUri}\`
+
+⚠️ *Note:* It may take 1-2 minutes for the project to become fully active.`;
+
+    await sendMessage(chatId, successMsg, "Markdown");
+    
+  } catch (error) {
+    console.error("Error:", error);
+    await sendMessage(chatId, `❌ Failed to create project: ${error.message}`);
+  }
+}
+
+async function handleListProjects(chatId, userId, kv) {
+  const projects = await getUserProjects(userId, kv);
+  
+  if (projects.length === 0) {
+    await sendMessage(chatId, "📭 You don't have any projects yet.\n\nUse /new to create one!");
+    return;
+  }
+  
+  let message = "*📋 Your Projects:*\n\n";
+  for (const project of projects) {
+    message += `📁 *${project.projectName}*\n🔗 ${project.url}\n🆔 \`${project.uuid}\`\n\n`;
+  }
+  
+  await sendMessage(chatId, message, "Markdown");
+}
+
+async function handleProjectInfo(chatId, args, userId, kv) {
+  if (args.length < 1) {
+    await sendMessage(chatId, "❌ Usage: /info <projectName>");
+    return;
+  }
+  
+  const projectName = args[0];
+  const projectKey = `user:${userId}:project:${projectName}`;
+  const data = await kv.get(projectKey);
+  
+  if (!data.value) {
+    await sendMessage(chatId, "❌ Project not found");
+    return;
+  }
+  
+  const project = JSON.parse(data.value);
+  const vlessUri = `vless://${project.uuid}@${project.projectName}.deno.dev:443?encryption=none&security=tls&sni=${project.projectName}.deno.dev&fp=randomized&type=ws&host=${project.projectName}.deno.dev&path=%2F%3Fed%3D2048#UserProject`;
+  
+  const infoMsg = `📁 *Project: ${project.projectName}*
+🆔 *UUID:* \`${project.uuid}\`
+🔗 *URL:* ${project.url}
+🔗 *Config URL:* ${project.configUrl}
+📅 *Created:* ${new Date(project.createdAt).toLocaleString()}
+
+🔗 *VLESS URI:*
+\`${vlessUri}\``;
+
+  await sendMessage(chatId, infoMsg, "Markdown");
+}
+
+async function handleDeleteProject(chatId, args, userId, kv) {
+  if (args.length < 1) {
+    await sendMessage(chatId, "❌ Usage: /delete <projectName>");
+    return;
+  }
+  
+  const projectName = args[0];
+  const projectKey = `user:${userId}:project:${projectName}`;
+  const data = await kv.get(projectKey);
+  
+  if (!data.value) {
+    await sendMessage(chatId, "❌ Project not found");
+    return;
+  }
+  
+  await deleteUserProject(userId, projectName, kv);
+  await sendMessage(chatId, `✅ Project "${projectName}" has been deleted from records.`);
+}
+
+// ===== Owner Commands =====
+async function handleAddUser(chatId, args, userId, kv) {
+  if (userId !== OWNER_ID) {
+    await sendMessage(chatId, "❌ Only owner can use this command");
+    return;
+  }
+  
+  if (args.length < 1) {
+    await sendMessage(chatId, "❌ Usage: /adduser <telegram_id>");
+    return;
+  }
+  
+  const targetUserId = parseInt(args[0]);
+  if (isNaN(targetUserId)) {
+    await sendMessage(chatId, "❌ Invalid user ID");
+    return;
+  }
+  
+  await addAllowedUser(targetUserId, kv);
+  await sendMessage(chatId, `✅ User ${targetUserId} has been added`);
+  await sendMessage(targetUserId, "🎉 You have been authorized to use this bot!\nUse /start to begin.");
+}
+
+async function handleRemoveUser(chatId, args, userId, kv) {
+  if (userId !== OWNER_ID) {
+    await sendMessage(chatId, "❌ Only owner can use this command");
+    return;
+  }
+  
+  if (args.length < 1) {
+    await sendMessage(chatId, "❌ Usage: /removeuser <telegram_id>");
+    return;
+  }
+  
+  const targetUserId = parseInt(args[0]);
+  if (isNaN(targetUserId)) {
+    await sendMessage(chatId, "❌ Invalid user ID");
+    return;
+  }
+  
+  await removeAllowedUser(targetUserId, kv);
+  await sendMessage(chatId, `✅ User ${targetUserId} has been removed`);
+}
+
+async function handleListUsers(chatId, userId, kv) {
+  if (userId !== OWNER_ID) {
+    await sendMessage(chatId, "❌ Only owner can use this command");
+    return;
+  }
+  
+  const users = await getAllowedUsers(kv);
+  let message = "*👥 Authorized Users:*\n\n";
+  message += `👑 Owner: ${OWNER_ID}\n\n`;
+  
+  if (users.length > 0) {
+    message += "*Allowed Users:*\n";
+    for (const uid of users) {
+      message += `• ${uid}\n`;
+    }
+  } else {
+    message += "No additional users added.";
+  }
+  
+  await sendMessage(chatId, message, "Markdown");
+}
