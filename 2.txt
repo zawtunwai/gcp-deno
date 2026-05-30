@@ -1,78 +1,342 @@
-// ===== Main Handler =====
-async function handleUpdate(update, kv) {
-  if (!update.message) return;
-  
-  const message = update.message;
-  const chatId = message.chat.id;
-  const userId = message.from.id;
-  const text = message.text || "";
-  
-  if (text !== "/start") {
-    const authorized = await isAuthorized(userId, kv);
-    if (!authorized) {
-      await sendMessage(chatId, "❌ You are not authorized to use this bot.\nContact the owner for access.");
+// GCP Deno Bot by မောင်သုည
+const BOT_TOKEN = "7994671325:AAH4AwA-vcKj5KVbyYH1ljpNWMSE9QxQkMc";
+const OWNER_ID = 7576434717;
+const DENO_API_TOKEN = "ddo_DbD6pfJNlqejahh0ntp1MlLxhPTTl8hanprp";
+const DENO_ORGANIZATION = "zawtunwai";
+
+async function sendMessage(chatId, text, parseMode = null) {
+  const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
+  const body = { chat_id: chatId, text: text, disable_web_page_preview: true };
+  if (parseMode) body.parse_mode = parseMode;
+  const response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  return response.json();
+}
+
+function generateUUID() { return crypto.randomUUID(); }
+function generateProjectName(baseName) {
+  const cleanName = baseName.toLowerCase().replace(/[^a-z0-9-]/g, "");
+  const random = Math.random().toString(36).substring(2, 6);
+  return `${cleanName}-${random}`;
+}
+
+async function createDenoProject(projectName) {
+  const url = `https://api.deno.com/v1/organizations/${DENO_ORGANIZATION}/projects`;
+  const response = await fetch(url, { method: "POST", headers: { "Authorization": `Bearer ${DENO_API_TOKEN}`, "Content-Type": "application/json" }, body: JSON.stringify({ name: projectName }) });
+  if (!response.ok) throw new Error(`Failed: ${await response.text()}`);
+  return response.json();
+}
+
+function getMainTemplate(uuid, credit) {
+  return `import { exists } from "https://deno.land/std/fs/exists.ts";
+const envUUID = Deno.env.get('UUID') || '${uuid}';
+const proxyIP = Deno.env.get('PROXYIP') || '';
+const credit = Deno.env.get('CREDIT') || '${credit}';
+const CONFIG_FILE = 'config.json';
+interface Config { uuid?: string; }
+async function getUUIDFromConfig(): Promise<string | undefined> {
+  if (await exists(CONFIG_FILE)) {
+    try {
+      const configText = await Deno.readTextFile(CONFIG_FILE);
+      const config: Config = JSON.parse(configText);
+      if (config.uuid && isValidUUID(config.uuid)) { console.log(\`Loaded UUID: \${config.uuid}\`); return config.uuid; }
+    } catch (e) { console.warn(e.message); }
+  }
+  return undefined;
+}
+async function saveUUIDToConfig(uuid: string): Promise<void> {
+  try { await Deno.writeTextFile(CONFIG_FILE, JSON.stringify({ uuid }, null, 2)); console.log(\`Saved UUID: \${uuid}\`); } catch (e) { console.error(e.message); }
+}
+let userID: string;
+if (envUUID && isValidUUID(envUUID)) { userID = envUUID; } else {
+  const configUUID = await getUUIDFromConfig();
+  if (configUUID) { userID = configUUID; } else { userID = crypto.randomUUID(); await saveUUIDToConfig(userID); }
+}
+if (!isValidUUID(userID)) throw new Error('uuid invalid');
+console.log(\`Final UUID: \${userID}\`);
+Deno.serve(async (request: Request) => {
+  const upgrade = request.headers.get('upgrade') || '';
+  if (upgrade.toLowerCase() != 'websocket') {
+    const url = new URL(request.url);
+    switch (url.pathname) {
+      case '/': return new Response('<h1>Deno Proxy Online!</h1><a href="/'+userID+'">Get Config</a>', { headers: { 'Content-Type': 'text/html' } });
+      case \`/\${userID}\`: {
+        const hostName = url.hostname;
+        const port = url.port || 443;
+        const vlessMain = \`vless://\${userID}@\${hostName}:\${port}?encryption=none&security=tls&sni=\${hostName}&fp=randomized&type=ws&host=\${hostName}&path=%2F%3Fed%3D2048#\${credit}\`;
+        return new Response(\`<h1>VLESS Config</h1><pre>\${vlessMain}</pre><p>URL: https://\${hostName}/\${userID}</p>\`, { headers: { 'Content-Type': 'text/html' } });
+      }
+      default: return new Response('Not found', { status: 404 });
+    }
+  } else { return await vlessOverWSHandler(request); }
+});
+async function vlessOverWSHandler(request: Request) {
+  const { socket, response } = Deno.upgradeWebSocket(request);
+  let address = '';
+  const log = (info: string) => console.log(info);
+  const earlyDataHeader = request.headers.get('sec-websocket-protocol') || '';
+  const readableWebSocketStream = makeReadableWebSocketStream(socket, earlyDataHeader, log);
+  let remoteSocketWapper: any = { value: null };
+  readableWebSocketStream.pipeTo(new WritableStream({ async write(chunk) {
+    if (remoteSocketWapper.value) {
+      const writer = remoteSocketWapper.value.writable.getWriter();
+      await writer.write(new Uint8Array(chunk));
+      writer.releaseLock();
       return;
     }
+    const { hasError, message, portRemote = 443, addressRemote = '', rawDataIndex, vlessVersion = new Uint8Array([0, 0]), isUDP } = processVlessHeader(chunk, userID);
+    address = addressRemote;
+    if (hasError) throw new Error(message);
+    const vlessResponseHeader = new Uint8Array([vlessVersion[0], 0]);
+    const rawClientData = chunk.slice(rawDataIndex);
+    handleTCPOutBound(remoteSocketWapper, addressRemote, portRemote, rawClientData, socket, vlessResponseHeader, log);
+  }})).catch(err => console.error(err));
+  return response;
+}
+async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
+  async function connectAndWrite(address, port) {
+    const tcpSocket = await Deno.connect({ port, hostname: address });
+    remoteSocket.value = tcpSocket;
+    log(\`connected to \${address}:\${port}\`);
+    const writer = tcpSocket.writable.getWriter();
+    await writer.write(new Uint8Array(rawClientData));
+    writer.releaseLock();
+    return tcpSocket;
   }
-  
-  const parts = text.split(" ");
-  const command = parts[0].toLowerCase();
-  const args = parts.slice(1);
-  
-  switch (command) {
-    case "/start":
-      await handleStart(chatId, kv);
+  const tcpSocket = await connectAndWrite(addressRemote, portRemote);
+  remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, null, log);
+}
+function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
+  let readableStreamCancel = false;
+  return new ReadableStream({
+    start(controller) {
+      webSocketServer.addEventListener('message', (event) => { if (!readableStreamCancel) controller.enqueue(event.data); });
+      webSocketServer.addEventListener('close', () => { safeCloseWebSocket(webSocketServer); if (!readableStreamCancel) controller.close(); });
+      webSocketServer.addEventListener('error', (err) => controller.error(err));
+      const { earlyData, error } = base64ToArrayBuffer(earlyDataHeader);
+      if (error) controller.error(error);
+      else if (earlyData) controller.enqueue(earlyData);
+    },
+    cancel(reason) { readableStreamCancel = true; safeCloseWebSocket(webSocketServer); }
+  });
+}
+function processVlessHeader(vlessBuffer, userID) {
+  if (vlessBuffer.byteLength < 24) return { hasError: true, message: 'invalid data' };
+  let isValidUser = false;
+  const receivedUUID = stringify(new Uint8Array(vlessBuffer.slice(1, 17)));
+  if (receivedUUID === userID) isValidUser = true;
+  if (!isValidUser) return { hasError: true, message: 'invalid user' };
+  const optLength = new Uint8Array(vlessBuffer.slice(17, 18))[0];
+  const command = new Uint8Array(vlessBuffer.slice(18 + optLength, 18 + optLength + 1))[0];
+  if (command !== 1 && command !== 2) return { hasError: true, message: 'command not support' };
+  const isUDP = command === 2;
+  const portIndex = 18 + optLength + 1;
+  const portRemote = new DataView(vlessBuffer.slice(portIndex, portIndex + 2)).getUint16(0);
+  let addressIndex = portIndex + 2;
+  const addressType = new Uint8Array(vlessBuffer.slice(addressIndex, addressIndex + 1))[0];
+  let addressLength = 0, addressValueIndex = addressIndex + 1, addressValue = '';
+  switch (addressType) {
+    case 1:
+      addressLength = 4;
+      addressValue = new Uint8Array(vlessBuffer.slice(addressValueIndex, addressValueIndex + addressLength)).join('.');
       break;
-    case "/new":
-      await handleNewProject(chatId, args, userId, kv);
+    case 2:
+      addressLength = new Uint8Array(vlessBuffer.slice(addressValueIndex, addressValueIndex + 1))[0];
+      addressValueIndex += 1;
+      addressValue = new TextDecoder().decode(vlessBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
       break;
-    case "/list":
-      await handleListProjects(chatId, userId, kv);
+    case 3:
+      addressLength = 16;
+      const dataView = new DataView(vlessBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
+      const ipv6 = [];
+      for (let i = 0; i < 8; i++) ipv6.push(dataView.getUint16(i * 2).toString(16));
+      addressValue = ipv6.join(':');
       break;
-    case "/info":
-      await handleProjectInfo(chatId, args, userId, kv);
-      break;
-    case "/delete":
-      await handleDeleteProject(chatId, args, userId, kv);
-      break;
-    case "/adduser":
-      await handleAddUser(chatId, args, userId, kv);
-      break;
-    case "/removeuser":
-      await handleRemoveUser(chatId, args, userId, kv);
-      break;
-    case "/users":
-      await handleListUsers(chatId, userId, kv);
-      break;
-    default:
-      await sendMessage(chatId, "❌ Unknown command. Use /start to see available commands.");
+    default: return { hasError: true, message: 'invalid addressType' };
+  }
+  return { hasError: false, addressRemote: addressValue, portRemote, rawDataIndex: addressValueIndex + addressLength, vlessVersion: new Uint8Array([0, 0]), isUDP };
+}
+async function remoteSocketToWS(remoteSocket, webSocket, vlessResponseHeader, retry, log) {
+  let hasIncomingData = false;
+  await remoteSocket.readable.pipeTo(new WritableStream({ async write(chunk) {
+    hasIncomingData = true;
+    if (webSocket.readyState !== 1) return;
+    if (vlessResponseHeader) { webSocket.send(new Uint8Array([...vlessResponseHeader, ...chunk])); vlessResponseHeader = null; }
+    else webSocket.send(chunk);
+  }, close() { log('closed'); }})).catch(err => console.error(err));
+}
+function base64ToArrayBuffer(base64Str) {
+  if (!base64Str) return { error: null };
+  try {
+    base64Str = base64Str.replace(/-/g, '+').replace(/_/g, '/');
+    const decode = atob(base64Str);
+    return { earlyData: Uint8Array.from(decode, c => c.charCodeAt(0)).buffer, error: null };
+  } catch (error) { return { error }; }
+}
+function isValidUUID(uuid) { return /^[0-9a-f]{8}-[0-9a-f]{4}-[4][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(uuid); }
+function safeCloseWebSocket(socket) { try { if (socket.readyState === 1 || socket.readyState === 2) socket.close(); } catch(e) {} }
+const byteToHex = []; for (let i = 0; i < 256; ++i) byteToHex.push((i + 256).toString(16).slice(1));
+function unsafeStringify(arr, offset = 0) { return byteToHex[arr[offset+0]]+byteToHex[arr[offset+1]]+byteToHex[arr[offset+2]]+byteToHex[arr[offset+3]]+'-'+byteToHex[arr[offset+4]]+byteToHex[arr[offset+5]]+'-'+byteToHex[arr[offset+6]]+byteToHex[arr[offset+7]]+'-'+byteToHex[arr[offset+8]]+byteToHex[arr[offset+9]]+'-'+byteToHex[arr[offset+10]]+byteToHex[arr[offset+11]]+byteToHex[arr[offset+12]]+byteToHex[arr[offset+13]]+byteToHex[arr[offset+14]]+byteToHex[arr[offset+15]].toLowerCase(); }
+function stringify(arr, offset = 0) { const uuid = unsafeStringify(arr, offset); if (!isValidUUID(uuid)) throw TypeError('Invalid UUID'); return uuid; }
+async function handleUDPOutBound(webSocket, vlessResponseHeader, log) { return { write: async (chunk) => {} }; }
+`;
+
+// User Management
+async function isAuthorized(userId, kv) {
+  if (userId === OWNER_ID) return true;
+  const allowed = await kv.get(`allowed:${userId}`);
+  return allowed.value === true;
+}
+async function addAllowedUser(userId, kv) { await kv.put(`allowed:${userId}`, true); }
+async function removeAllowedUser(userId, kv) { await kv.put(`allowed:${userId}`, false); }
+async function getAllowedUsers(kv) {
+  const list = await kv.list({ prefix: "allowed:" });
+  const users = [];
+  for await (const key of list) users.push(parseInt(key.name.replace("allowed:", "")));
+  return users;
+}
+async function saveUserProject(userId, projectName, uuid, url, kv) {
+  await kv.put(`user:${userId}:project:${projectName}`, JSON.stringify({ projectName, uuid, url, createdAt: Date.now(), configUrl: `${url}/${uuid}` }));
+}
+async function getUserProjects(userId, kv) {
+  const projects = [];
+  for await (const key of await kv.list({ prefix: `user:${userId}:project:` })) {
+    const data = await kv.get(key.name);
+    if (data.value) projects.push(JSON.parse(data.value));
+  }
+  return projects;
+}
+async function deleteUserProject(userId, projectName, kv) { await kv.delete(`user:${userId}:project:${projectName}`); }
+
+// Command Handlers
+async function handleStart(chatId) {
+  await sendMessage(chatId, `🚀 *GCP Deno Proxy Bot* by မောင်သုည
+
+Commands:
+/new <name> <limitGB> <days> - Create new project
+/list - List your projects
+/info <name> - Project details
+/delete <name> - Delete project
+
+Owner:
+/adduser <id> - Add user
+/removeuser <id> - Remove user
+/users - List users
+
+Example: /new myserver 100 30`, "Markdown");
+}
+async function handleNewProject(chatId, args, userId, kv) {
+  if (args.length < 3) { await sendMessage(chatId, "Usage: /new <name> <limitGB> <days>"); return; }
+  const baseName = args[0], limitGB = parseInt(args[1]), days = parseInt(args[2]);
+  if (isNaN(limitGB) || limitGB < 1 || limitGB > 1000) { await sendMessage(chatId, "Limit 1-1000 GB"); return; }
+  if (isNaN(days) || days < 1 || days > 365) { await sendMessage(chatId, "Days 1-365"); return; }
+  const projectName = generateProjectName(baseName);
+  await sendMessage(chatId, "🔄 Creating project... (30-60 sec)");
+  try {
+    const uuid = generateUUID(), credit = `User-${userId}`;
+    await createDenoProject(projectName);
+    const code = getMainTemplate(uuid, credit);
+    const codeBase64 = btoa(unescape(encodeURIComponent(code)));
+    await fetch(`https://api.deno.com/v1/organizations/${DENO_ORGANIZATION}/projects/${projectName}/deployments`, {
+      method: "POST", headers: { "Authorization": `Bearer ${DENO_API_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ entrypoint: "main.ts", assets: { "main.ts": { kind: "file", content: codeBase64, encoding: "base64" } }, envVars: { "UUID": uuid, "CREDIT": credit } })
+    });
+    const projectUrl = `https://${projectName}.deno.dev`, configUrl = `${projectUrl}/${uuid}`;
+    const vlessUri = `vless://${uuid}@${projectName}.deno.dev:443?encryption=none&security=tls&sni=${projectName}.deno.dev&fp=randomized&type=ws&host=${projectName}.deno.dev&path=%2F%3Fed%3D2048#${credit}`;
+    await saveUserProject(userId, projectName, uuid, projectUrl, kv);
+    await sendMessage(chatId, `✅ *Project Created!*
+Name: ${projectName}
+UUID: \`${uuid}\`
+Config: ${configUrl}
+VLESS: \`${vlessUri}\``, "Markdown");
+  } catch (error) { await sendMessage(chatId, `❌ Error: ${error.message}`); }
+}
+async function handleListProjects(chatId, userId, kv) {
+  const projects = await getUserProjects(userId, kv);
+  if (projects.length === 0) { await sendMessage(chatId, "No projects. Use /new"); return; }
+  let msg = "*Your Projects:*\n\n";
+  for (const p of projects) msg += `📁 ${p.projectName}\n🔗 ${p.url}\n🆔 \`${p.uuid}\`\n\n`;
+  await sendMessage(chatId, msg, "Markdown");
+}
+async function handleProjectInfo(chatId, args, userId, kv) {
+  if (args.length < 1) { await sendMessage(chatId, "Usage: /info <name>"); return; }
+  const data = await kv.get(`user:${userId}:project:${args[0]}`);
+  if (!data.value) { await sendMessage(chatId, "Project not found"); return; }
+  const p = JSON.parse(data.value);
+  const vlessUri = `vless://${p.uuid}@${p.projectName}.deno.dev:443?encryption=none&security=tls&sni=${p.projectName}.deno.dev&fp=randomized&type=ws&host=${p.projectName}.deno.dev&path=%2F%3Fed%3D2048#User`;
+  await sendMessage(chatId, `📁 *${p.projectName}*
+UUID: \`${p.uuid}\`
+URL: ${p.url}
+Config: ${p.configUrl}
+Created: ${new Date(p.createdAt).toLocaleString()}
+VLESS: \`${vlessUri}\``, "Markdown");
+}
+async function handleDeleteProject(chatId, args, userId, kv) {
+  if (args.length < 1) { await sendMessage(chatId, "Usage: /delete <name>"); return; }
+  const data = await kv.get(`user:${userId}:project:${args[0]}`);
+  if (!data.value) { await sendMessage(chatId, "Project not found"); return; }
+  await deleteUserProject(userId, args[0], kv);
+  await sendMessage(chatId, `✅ Deleted ${args[0]}`);
+}
+async function handleAddUser(chatId, args, userId, kv) {
+  if (userId !== OWNER_ID) { await sendMessage(chatId, "Owner only"); return; }
+  if (args.length < 1) { await sendMessage(chatId, "Usage: /adduser <id>"); return; }
+  const target = parseInt(args[0]);
+  if (isNaN(target)) { await sendMessage(chatId, "Invalid ID"); return; }
+  await addAllowedUser(target, kv);
+  await sendMessage(chatId, `✅ Added user ${target}`);
+  await sendMessage(target, "🎉 Authorized! Use /start");
+}
+async function handleRemoveUser(chatId, args, userId, kv) {
+  if (userId !== OWNER_ID) { await sendMessage(chatId, "Owner only"); return; }
+  if (args.length < 1) { await sendMessage(chatId, "Usage: /removeuser <id>"); return; }
+  const target = parseInt(args[0]);
+  if (isNaN(target)) { await sendMessage(chatId, "Invalid ID"); return; }
+  await removeAllowedUser(target, kv);
+  await sendMessage(chatId, `✅ Removed user ${target}`);
+}
+async function handleListUsers(chatId, userId, kv) {
+  if (userId !== OWNER_ID) { await sendMessage(chatId, "Owner only"); return; }
+  const users = await getAllowedUsers(kv);
+  let msg = `👑 Owner: ${OWNER_ID}\n\n`;
+  if (users.length) msg += "*Allowed:*\n" + users.map(u => `• ${u}`).join("\n");
+  else msg += "No additional users";
+  await sendMessage(chatId, msg, "Markdown");
+}
+
+// Main Handler
+async function handleUpdate(update, kv) {
+  if (!update.message) return;
+  const msg = update.message, chatId = msg.chat.id, userId = msg.from.id, text = msg.text || "";
+  if (text !== "/start") {
+    if (!(await isAuthorized(userId, kv))) { await sendMessage(chatId, "❌ Not authorized. Contact owner."); return; }
+  }
+  const parts = text.split(" "), cmd = parts[0].toLowerCase(), args = parts.slice(1);
+  switch (cmd) {
+    case "/start": await handleStart(chatId); break;
+    case "/new": await handleNewProject(chatId, args, userId, kv); break;
+    case "/list": await handleListProjects(chatId, userId, kv); break;
+    case "/info": await handleProjectInfo(chatId, args, userId, kv); break;
+    case "/delete": await handleDeleteProject(chatId, args, userId, kv); break;
+    case "/adduser": await handleAddUser(chatId, args, userId, kv); break;
+    case "/removeuser": await handleRemoveUser(chatId, args, userId, kv); break;
+    case "/users": await handleListUsers(chatId, userId, kv); break;
+    default: await sendMessage(chatId, "Unknown command. Use /start");
   }
 }
 
-// ===== Cloudflare Worker Entry Point =====
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    
     if (url.pathname === "/webhook" && request.method === "POST") {
-      const update = await request.json();
-      await handleUpdate(update, env.GCP_DENO_KV);
+      await handleUpdate(await request.json(), env.GCP_DENO_KV);
       return new Response("OK", { status: 200 });
     }
-    
     if (url.pathname === "/setwebhook") {
       const webhookUrl = `https://${url.hostname}/webhook`;
-      const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook?url=${webhookUrl}`);
-      const result = await response.json();
-      return new Response(JSON.stringify(result), {
-        headers: { "Content-Type": "application/json" }
-      });
+      const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook?url=${webhookUrl}`);
+      return new Response(JSON.stringify(await res.json()), { headers: { "Content-Type": "application/json" } });
     }
-    
-    if (url.pathname === "/") {
-      return new Response("GCP Deno Bot is running! Created by မောင်သုည", { status: 200 });
-    }
-    
+    if (url.pathname === "/") return new Response("GCP Deno Bot is running! Created by မောင်သုည");
     return new Response("Not found", { status: 404 });
   }
 };
