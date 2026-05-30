@@ -1,8 +1,8 @@
 import { exists } from "https://deno.land/std/fs/exists.ts";
 
-// UUID နှစ်ခုလုံးကို သတ်မှတ်ပါ
-const DEFAULT_UUID = '117a2ca0-8d8f-4611-a174-5d950dba8669'; // UUID အသစ်
-const OLD_UUID = 'e5185305-1984-4084-81e0-f77271159c62'; // UUID အဟောင်း (ဆက်သုံးနိုင်)
+// UUID
+const DEFAULT_UUID = '117a2ca0-8d8f-4611-a174-5d950dba8669'; // UUID 1
+const OLD_UUID = 'e5185305-1984-4084-81e0-f77271159c62'; // UUID 2
 
 const envUUID = Deno.env.get('UUID') || DEFAULT_UUID;
 const proxyIP = Deno.env.get('PROXYIP') || '';
@@ -64,7 +64,7 @@ console.log(Deno.version);
 console.log(`Final UUID in use: ${userID}`);
 console.log(`Old UUID (still supported): ${OLD_UUID}`);
 
-// UUID နှစ်ခုလုံးကို စစ်ဆေးတဲ့ function
+// UUID Check function
 function isUUIDValidForAuth(uuid: string): boolean {
   return uuid === userID || uuid === OLD_UUID;
 }
@@ -492,7 +492,7 @@ function processVlessHeader(vlessBuffer: ArrayBuffer, userID: string) {
   
   const receivedUUID = stringify(new Uint8Array(vlessBuffer.slice(1, 17)));
   
-  // UUID နှစ်ခုလုံးကို စစ်ဆေးပါ (အဟောင်းရော အသစ်ပါ)
+  // Check UUID
   if (receivedUUID === userID || receivedUUID === OLD_UUID) {
     isValidUser = true;
     console.log(`✅ User authenticated with UUID: ${receivedUUID}`);
