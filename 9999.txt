@@ -1,13 +1,28 @@
+// ========================
 // GCP Deno Bot by မောင်သုည
+// Telegram Bot for VLESS Config Management
+// ========================
+
+// ===== CONFIGURATION =====
 const BOT_TOKEN = "7994671325:AAH4AwA-vcKj5KVbyYH1ljpNWMSE9QxQkMc";
 const OWNER_ID = 7576434717;
-const DENO_API_TOKEN = "ddo_FmjC6WLbbaHAIpsxdgixwzbIicEdWepfrbpm";
-const DENO_ORGANIZATION = "zawtunwai";
+const DENO_API_TOKEN = "ddo_FmjC6WLbbaHAIpsxdgixwzbIicEdWepfrbpm"; // နောက်မှ ထည့်ပါ
+const DENO_PROJECT_ID = "gcp-deno";
+const DENO_DOMAIN = "xraycloud.my.id";
 
+// ===== Allowed Users Storage (Deno KV) =====
+// Note: Cloudflare Worker မှာ KV သုံးဖို့ binding လိုအပ်ပါတယ်။
+
+// ===== Helper Functions =====
 async function sendMessage(chatId, text, parseMode = null) {
   const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
-  const body = { chat_id: chatId, text: text, disable_web_page_preview: true };
+  const body = {
+    chat_id: chatId,
+    text: text,
+    disable_web_page_preview: true
+  };
   if (parseMode) body.parse_mode = parseMode;
+  
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -16,301 +31,81 @@ async function sendMessage(chatId, text, parseMode = null) {
   return response.json();
 }
 
+async function sendPhoto(chatId, photoUrl, caption = "") {
+  const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      photo: photoUrl,
+      caption: caption
+    })
+  });
+  return response.json();
+}
+
+function isValidUUID(uuid) {
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[4][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  return uuidRegex.test(uuid);
+}
+
 function generateUUID() {
   return crypto.randomUUID();
 }
 
-function generateProjectName(baseName) {
-  const cleanName = baseName.toLowerCase().replace(/[^a-z0-9-]/g, "");
-  const random = Math.random().toString(36).substring(2, 6);
-  return `${cleanName}-${random}`;
+function formatVLessConfig(uuid, host, credit = "GCP-Deno") {
+  return `vless://${uuid}@${host}:443?encryption=none&security=tls&sni=${host}&fp=randomized&type=ws&host=${host}&path=%2F%3Fed%3D2048#${credit}`;
 }
 
-async function createDenoProject(projectName) {
-  const url = `https://api.deno.com/v1/organizations/${DENO_ORGANIZATION}/projects`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${DENO_API_TOKEN}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({ name: projectName })
-  });
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`Failed to create project: ${error}`);
-  }
-  return response.json();
+function formatClashConfig(uuid, host) {
+  return `- type: vless
+  name: ${host}
+  server: ${host}
+  port: 443
+  uuid: ${uuid}
+  network: ws
+  tls: true
+  udp: false
+  sni: ${host}
+  client-fingerprint: chrome
+  ws-opts:
+    path: "/?ed=2048"
+    headers:
+      host: ${host}`;
 }
 
-function getMainTemplate(uuid, credit) {
-  return `import { exists } from "https://deno.land/std/fs/exists.ts";
-
-const envUUID = Deno.env.get('UUID') || '${uuid}';
-const proxyIP = Deno.env.get('PROXYIP') || '';
-const credit = Deno.env.get('CREDIT') || '${credit}';
-const CONFIG_FILE = 'config.json';
-
-interface Config {
-  uuid?: string;
-}
-
-async function getUUIDFromConfig(): Promise<string | undefined> {
-  if (await exists(CONFIG_FILE)) {
-    try {
-      const configText = await Deno.readTextFile(CONFIG_FILE);
-      const config: Config = JSON.parse(configText);
-      if (config.uuid && isValidUUID(config.uuid)) {
-        console.log(\`Loaded UUID: \${config.uuid}\`);
-        return config.uuid;
+function formatSingboxConfig(uuid, host) {
+  return `{
+  "outbounds": [
+    {
+      "type": "vless",
+      "tag": "${host}",
+      "server": "${host}",
+      "server_port": 443,
+      "uuid": "${uuid}",
+      "flow": "",
+      "tls": {
+        "enabled": true,
+        "server_name": "${host}",
+        "utls": {
+          "enabled": true,
+          "fingerprint": "chrome"
+        }
+      },
+      "transport": {
+        "type": "ws",
+        "path": "/?ed=2048",
+        "headers": {
+          "Host": "${host}"
+        }
       }
-    } catch (e) {
-      console.warn(e.message);
     }
-  }
-  return undefined;
+  ]
+}`;
 }
 
-async function saveUUIDToConfig(uuid: string): Promise<void> {
-  try {
-    await Deno.writeTextFile(CONFIG_FILE, JSON.stringify({ uuid }, null, 2));
-    console.log(\`Saved UUID: \${uuid}\`);
-  } catch (e) {
-    console.error(e.message);
-  }
-}
-
-let userID: string;
-if (envUUID && isValidUUID(envUUID)) {
-  userID = envUUID;
-} else {
-  const configUUID = await getUUIDFromConfig();
-  if (configUUID) {
-    userID = configUUID;
-  } else {
-    userID = crypto.randomUUID();
-    await saveUUIDToConfig(userID);
-  }
-}
-
-if (!isValidUUID(userID)) {
-  throw new Error('uuid invalid');
-}
-
-console.log(\`Final UUID: \${userID}\`);
-
-Deno.serve(async (request: Request) => {
-  const upgrade = request.headers.get('upgrade') || '';
-  if (upgrade.toLowerCase() != 'websocket') {
-    const url = new URL(request.url);
-    switch (url.pathname) {
-      case '/': {
-        return new Response('<h1>Deno Proxy Online!</h1><a href="/' + userID + '">Get Config</a>', {
-          headers: { 'Content-Type': 'text/html' }
-        });
-      }
-      case \`/\${userID}\`: {
-        const hostName = url.hostname;
-        const port = url.port || 443;
-        const vlessMain = \`vless://\${userID}@\${hostName}:\${port}?encryption=none&security=tls&sni=\${hostName}&fp=randomized&type=ws&host=\${hostName}&path=%2F%3Fed%3D2048#\${credit}\`;
-        return new Response(\`<h1>VLESS Config</h1><pre>\${vlessMain}</pre><p>URL: https://\${hostName}/\${userID}</p>\`, {
-          headers: { 'Content-Type': 'text/html' }
-        });
-      }
-      default:
-        return new Response('Not found', { status: 404 });
-    }
-  } else {
-    return await vlessOverWSHandler(request);
-  }
-});
-
-async function vlessOverWSHandler(request: Request) {
-  const { socket, response } = Deno.upgradeWebSocket(request);
-  let address = '';
-  const log = (info: string) => console.log(info);
-  const earlyDataHeader = request.headers.get('sec-websocket-protocol') || '';
-  const readableWebSocketStream = makeReadableWebSocketStream(socket, earlyDataHeader, log);
-  let remoteSocketWapper: any = { value: null };
-  
-  readableWebSocketStream.pipeTo(new WritableStream({
-    async write(chunk) {
-      if (remoteSocketWapper.value) {
-        const writer = remoteSocketWapper.value.writable.getWriter();
-        await writer.write(new Uint8Array(chunk));
-        writer.releaseLock();
-        return;
-      }
-      const { hasError, message, portRemote = 443, addressRemote = '', rawDataIndex, vlessVersion = new Uint8Array([0, 0]), isUDP } = processVlessHeader(chunk, userID);
-      address = addressRemote;
-      if (hasError) throw new Error(message);
-      const vlessResponseHeader = new Uint8Array([vlessVersion[0], 0]);
-      const rawClientData = chunk.slice(rawDataIndex);
-      handleTCPOutBound(remoteSocketWapper, addressRemote, portRemote, rawClientData, socket, vlessResponseHeader, log);
-    }
-  })).catch(err => console.error(err));
-  
-  return response;
-}
-
-async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log) {
-  async function connectAndWrite(address, port) {
-    const tcpSocket = await Deno.connect({ port, hostname: address });
-    remoteSocket.value = tcpSocket;
-    log(\`connected to \${address}:\${port}\`);
-    const writer = tcpSocket.writable.getWriter();
-    await writer.write(new Uint8Array(rawClientData));
-    writer.releaseLock();
-    return tcpSocket;
-  }
-  const tcpSocket = await connectAndWrite(addressRemote, portRemote);
-  remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, null, log);
-}
-
-function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
-  let readableStreamCancel = false;
-  return new ReadableStream({
-    start(controller) {
-      webSocketServer.addEventListener('message', (event) => {
-        if (!readableStreamCancel) controller.enqueue(event.data);
-      });
-      webSocketServer.addEventListener('close', () => {
-        safeCloseWebSocket(webSocketServer);
-        if (!readableStreamCancel) controller.close();
-      });
-      webSocketServer.addEventListener('error', (err) => controller.error(err));
-      const { earlyData, error } = base64ToArrayBuffer(earlyDataHeader);
-      if (error) controller.error(error);
-      else if (earlyData) controller.enqueue(earlyData);
-    },
-    cancel(reason) {
-      readableStreamCancel = true;
-      safeCloseWebSocket(webSocketServer);
-    }
-  });
-}
-
-function processVlessHeader(vlessBuffer, userID) {
-  if (vlessBuffer.byteLength < 24) {
-    return { hasError: true, message: 'invalid data' };
-  }
-  let isValidUser = false;
-  const receivedUUID = stringify(new Uint8Array(vlessBuffer.slice(1, 17)));
-  if (receivedUUID === userID) isValidUser = true;
-  if (!isValidUser) {
-    return { hasError: true, message: 'invalid user' };
-  }
-  const optLength = new Uint8Array(vlessBuffer.slice(17, 18))[0];
-  const command = new Uint8Array(vlessBuffer.slice(18 + optLength, 18 + optLength + 1))[0];
-  if (command !== 1 && command !== 2) {
-    return { hasError: true, message: 'command not support' };
-  }
-  const isUDP = command === 2;
-  const portIndex = 18 + optLength + 1;
-  const portRemote = new DataView(vlessBuffer.slice(portIndex, portIndex + 2)).getUint16(0);
-  let addressIndex = portIndex + 2;
-  const addressType = new Uint8Array(vlessBuffer.slice(addressIndex, addressIndex + 1))[0];
-  let addressLength = 0;
-  let addressValueIndex = addressIndex + 1;
-  let addressValue = '';
-  switch (addressType) {
-    case 1:
-      addressLength = 4;
-      addressValue = new Uint8Array(vlessBuffer.slice(addressValueIndex, addressValueIndex + addressLength)).join('.');
-      break;
-    case 2:
-      addressLength = new Uint8Array(vlessBuffer.slice(addressValueIndex, addressValueIndex + 1))[0];
-      addressValueIndex += 1;
-      addressValue = new TextDecoder().decode(vlessBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
-      break;
-    case 3:
-      addressLength = 16;
-      const dataView = new DataView(vlessBuffer.slice(addressValueIndex, addressValueIndex + addressLength));
-      const ipv6 = [];
-      for (let i = 0; i < 8; i++) {
-        ipv6.push(dataView.getUint16(i * 2).toString(16));
-      }
-      addressValue = ipv6.join(':');
-      break;
-    default:
-      return { hasError: true, message: 'invalid addressType' };
-  }
-  return {
-    hasError: false,
-    addressRemote: addressValue,
-    portRemote,
-    rawDataIndex: addressValueIndex + addressLength,
-    vlessVersion: new Uint8Array([0, 0]),
-    isUDP
-  };
-}
-
-async function remoteSocketToWS(remoteSocket, webSocket, vlessResponseHeader, retry, log) {
-  let hasIncomingData = false;
-  await remoteSocket.readable.pipeTo(new WritableStream({
-    async write(chunk) {
-      hasIncomingData = true;
-      if (webSocket.readyState !== 1) return;
-      if (vlessResponseHeader) {
-        webSocket.send(new Uint8Array([...vlessResponseHeader, ...chunk]));
-        vlessResponseHeader = null;
-      } else {
-        webSocket.send(chunk);
-      }
-    },
-    close() {
-      log('closed');
-    }
-  })).catch(err => console.error(err));
-}
-
-function base64ToArrayBuffer(base64Str) {
-  if (!base64Str) return { error: null };
-  try {
-    base64Str = base64Str.replace(/-/g, '+').replace(/_/g, '/');
-    const decode = atob(base64Str);
-    return { earlyData: Uint8Array.from(decode, c => c.charCodeAt(0)).buffer, error: null };
-  } catch (error) {
-    return { error: error };
-  }
-}
-
-function isValidUUID(uuid) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[4][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(uuid);
-}
-
-function safeCloseWebSocket(socket) {
-  try {
-    if (socket.readyState === 1 || socket.readyState === 2) socket.close();
-  } catch(e) {}
-}
-
-const byteToHex = [];
-for (let i = 0; i < 256; ++i) {
-  byteToHex.push((i + 256).toString(16).slice(1));
-}
-
-function unsafeStringify(arr, offset = 0) {
-  return byteToHex[arr[offset+0]] + byteToHex[arr[offset+1]] + byteToHex[arr[offset+2]] + byteToHex[arr[offset+3]] + '-' +
-         byteToHex[arr[offset+4]] + byteToHex[arr[offset+5]] + '-' +
-         byteToHex[arr[offset+6]] + byteToHex[arr[offset+7]] + '-' +
-         byteToHex[arr[offset+8]] + byteToHex[arr[offset+9]] + '-' +
-         byteToHex[arr[offset+10]] + byteToHex[arr[offset+11]] + byteToHex[arr[offset+12]] + byteToHex[arr[offset+13]] +
-         byteToHex[arr[offset+14]] + byteToHex[arr[offset+15]].toLowerCase();
-}
-
-function stringify(arr, offset = 0) {
-  const uuid = unsafeStringify(arr, offset);
-  if (!isValidUUID(uuid)) throw TypeError('Invalid UUID');
-  return uuid;
-}
-
-async function handleUDPOutBound(webSocket, vlessResponseHeader, log) {
-  return { write: async (chunk) => {} };
-}
-`;
-
-// User Management
+// ===== User Management Functions (KV သုံးမယ်) =====
 async function isAuthorized(userId, kv) {
   if (userId === OWNER_ID) return true;
   const allowed = await kv.get(`allowed:${userId}`);
@@ -329,268 +124,414 @@ async function getAllowedUsers(kv) {
   const list = await kv.list({ prefix: "allowed:" });
   const users = [];
   for await (const key of list) {
-    users.push(parseInt(key.name.replace("allowed:", "")));
+    const userId = key.name.replace("allowed:", "");
+    if (userId && !isNaN(parseInt(userId))) {
+      users.push(parseInt(userId));
+    }
   }
   return users;
 }
 
-async function saveUserProject(userId, projectName, uuid, url, kv) {
-  await kv.put(`user:${userId}:project:${projectName}`, JSON.stringify({
-    projectName, uuid, url, createdAt: Date.now(), configUrl: `${url}/${uuid}`
-  }));
+// ===== Config Management Functions =====
+async function createConfig(userId, name, limitGB, expiryDays, kv) {
+  const uuid = generateUUID();
+  const expiry = Date.now() + (expiryDays * 24 * 60 * 60 * 1000);
+  const limitBytes = limitGB * 1024 * 1024 * 1024;
+  
+  const config = {
+    uuid: uuid,
+    name: name,
+    ownerId: userId,
+    limitGB: limitGB,
+    limitBytes: limitBytes,
+    expiry: expiry,
+    usageBytes: 0,
+    createdAt: Date.now(),
+    isActive: true
+  };
+  
+  await kv.put(`config:${uuid}`, JSON.stringify(config));
+  await kv.put(`userConfigs:${userId}:${uuid}`, true);
+  
+  return config;
 }
 
-async function getUserProjects(userId, kv) {
-  const projects = [];
-  for await (const key of await kv.list({ prefix: `user:${userId}:project:` })) {
-    const data = await kv.get(key.name);
-    if (data.value) projects.push(JSON.parse(data.value));
+async function getUserConfigs(userId, kv) {
+  const configs = [];
+  const list = await kv.list({ prefix: `userConfigs:${userId}:` });
+  for await (const key of list) {
+    const uuid = key.name.split(":").pop();
+    const configData = await kv.get(`config:${uuid}`);
+    if (configData.value) {
+      const config = JSON.parse(configData.value);
+      configs.push(config);
+    }
   }
-  return projects;
+  return configs;
 }
 
-async function deleteUserProject(userId, projectName, kv) {
-  await kv.delete(`user:${userId}:project:${projectName}`);
+async function getConfigByUuid(uuid, kv) {
+  const data = await kv.get(`config:${uuid}`);
+  if (data.value) {
+    return JSON.parse(data.value);
+  }
+  return null;
 }
 
-// Command Handlers
-async function handleStart(chatId) {
-  await sendMessage(chatId, `🚀 *GCP Deno Proxy Bot* by မောင်သုည
-
-Commands:
-/new <name> <limitGB> <days> - Create new project
-/list - List your projects
-/info <name> - Project details
-/delete <name> - Delete project
-
-Owner:
-/adduser <id> - Add user
-/removeuser <id> - Remove user
-/users - List users
-
-Example: /new myserver 100 30`, "Markdown");
+async function deleteConfig(uuid, kv) {
+  const config = await getConfigByUuid(uuid, kv);
+  if (config) {
+    await kv.delete(`config:${uuid}`);
+    await kv.delete(`userConfigs:${config.ownerId}:${uuid}`);
+    return true;
+  }
+  return false;
 }
 
-async function handleNewProject(chatId, args, userId, kv) {
+async function updateConfigUsage(uuid, bytes, kv) {
+  const configData = await kv.get(`config:${uuid}`);
+  if (configData.value) {
+    const config = JSON.parse(configData.value);
+    config.usageBytes += bytes;
+    await kv.put(`config:${uuid}`, JSON.stringify(config));
+    return config;
+  }
+  return null;
+}
+
+function formatConfigMessage(config, host) {
+  const remainingGB = ((config.limitBytes - config.usageBytes) / (1024 * 1024 * 1024)).toFixed(2);
+  const expiryDate = new Date(config.expiry).toLocaleDateString("en-GB");
+  const status = config.isActive && config.expiry > Date.now() && config.usageBytes < config.limitBytes ? "✅ Active" : "❌ Expired/Limit Reached";
+  
+  const vlessUri = formatVLessConfig(config.uuid, host, "GCP-Deno");
+  const clashConfig = formatClashConfig(config.uuid, host);
+  const singboxConfig = formatSingboxConfig(config.uuid, host);
+  
+  return `📁 *Config: ${config.name}*
+🆔 *UUID:* \`${config.uuid}\`
+📊 *Status:* ${status}
+💾 *Usage:* ${(config.usageBytes / (1024 * 1024 * 1024)).toFixed(2)} GB / ${config.limitGB} GB
+📉 *Remaining:* ${remainingGB} GB
+⏰ *Expiry:* ${expiryDate}
+
+🔗 *VLESS URI:*
+\`${vlessUri}\`
+
+📡 *Clash-Meta:*
+\`\`\`yaml
+${clashConfig}
+\`\`\`
+
+🎮 *Sing-box:*
+\`\`\`json
+${singboxConfig}
+\`\`\`
+
+🔗 *Config URL:* https://${host}/${config.uuid}`;
+}
+
+// ===== Command Handlers =====
+async function handleStart(chatId, kv) {
+  const welcomeMsg = `🚀 *GCP Deno Proxy Bot* by မောင်သုည
+
+ဒီ Bot က VLESS over WebSocket proxy config တွေကို စီမံခန့်ခွဲနိုင်ပါတယ်။
+
+📌 *Commands:*
+
+👤 *User Commands:*
+/new <name> <limitGB> <days> - အသစ်ဖန်တီးရန်
+/list - ကိုယ်ပိုင် config စာရင်း
+/info <uuid> - config အသေးစိတ်
+/delete <uuid> - config ဖျက်ရန်
+
+👑 *Owner Commands:*
+/adduser <id> - user ထည့်ရန်
+/removeuser <id> - user ဖျက်ရန်
+/users - user စာရင်း
+/broadcast <message> - အားလုံးကို message ပို့ရန်
+
+⚡ *Example:*
+/new myserver 100 30`;
+
+  await sendMessage(chatId, welcomeMsg, "Markdown");
+}
+
+async function handleNewConfig(chatId, args, userId, kv) {
   if (args.length < 3) {
-    await sendMessage(chatId, "Usage: /new <name> <limitGB> <days>");
+    await sendMessage(chatId, "❌ Usage: /new <name> <limitGB> <days>\n\nExample: /new myserver 100 30");
     return;
   }
-  const baseName = args[0];
+  
+  const name = args[0];
   const limitGB = parseInt(args[1]);
   const days = parseInt(args[2]);
   
-  if (isNaN(limitGB) || limitGB < 1 || limitGB > 1000) {
-    await sendMessage(chatId, "Limit 1-1000 GB");
+  if (isNaN(limitGB) || limitGB < 1 || limitGB > 10000) {
+    await sendMessage(chatId, "❌ Limit must be between 1-10000 GB");
     return;
   }
+  
   if (isNaN(days) || days < 1 || days > 365) {
-    await sendMessage(chatId, "Days 1-365");
+    await sendMessage(chatId, "❌ Days must be between 1-365");
     return;
   }
   
-  const projectName = generateProjectName(baseName);
-  await sendMessage(chatId, "🔄 Creating project... (30-60 sec)");
+  const config = await createConfig(userId, name, limitGB, days, kv);
+  const message = formatConfigMessage(config, DENO_DOMAIN);
+  await sendMessage(chatId, message, "Markdown");
+}
+
+async function handleListConfigs(chatId, userId, kv) {
+  const configs = await getUserConfigs(userId, kv);
   
-  try {
-    const uuid = generateUUID();
-    const credit = `User-${userId}`;
-    
-    await createDenoProject(projectName);
-    
-    const code = getMainTemplate(uuid, credit);
-    const codeBase64 = btoa(unescape(encodeURIComponent(code)));
-    
-    await fetch(`https://api.deno.com/v1/organizations/${DENO_ORGANIZATION}/projects/${projectName}/deployments`, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${DENO_API_TOKEN}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        entrypoint: "main.ts",
-        assets: {
-          "main.ts": {
-            kind: "file",
-            content: codeBase64,
-            encoding: "base64"
-          }
-        },
-        envVars: {
-          "UUID": uuid,
-          "CREDIT": credit
-        }
-      })
-    });
-    
-    const projectUrl = `https://${projectName}.deno.dev`;
-    const configUrl = `${projectUrl}/${uuid}`;
-    const vlessUri = `vless://${uuid}@${projectName}.deno.dev:443?encryption=none&security=tls&sni=${projectName}.deno.dev&fp=randomized&type=ws&host=${projectName}.deno.dev&path=%2F%3Fed%3D2048#${credit}`;
-    
-    await saveUserProject(userId, projectName, uuid, projectUrl, kv);
-    
-    await sendMessage(chatId, `✅ *Project Created!*
-Name: ${projectName}
-UUID: \`${uuid}\`
-Config: ${configUrl}
-VLESS: \`${vlessUri}\``, "Markdown");
-    
-  } catch (error) {
-    await sendMessage(chatId, `❌ Error: ${error.message}`);
-  }
-}
-
-async function handleListProjects(chatId, userId, kv) {
-  const projects = await getUserProjects(userId, kv);
-  if (projects.length === 0) {
-    await sendMessage(chatId, "No projects. Use /new");
+  if (configs.length === 0) {
+    await sendMessage(chatId, "📭 You don't have any configs yet.\n\nUse /new to create one!");
     return;
   }
-  let msg = "*Your Projects:*\n\n";
-  for (const p of projects) {
-    msg += `📁 ${p.projectName}\n🔗 ${p.url}\n🆔 \`${p.uuid}\`\n\n`;
+  
+  let message = "*📋 Your Configs:*\n\n";
+  for (const config of configs) {
+    const status = config.isActive && config.expiry > Date.now() && config.usageBytes < config.limitBytes ? "✅" : "❌";
+    message += `${status} *${config.name}*\n🆔 \`${config.uuid}\`\n📊 ${(config.usageBytes / (1024 * 1024 * 1024)).toFixed(2)}GB/${config.limitGB}GB\n\n`;
   }
-  await sendMessage(chatId, msg, "Markdown");
+  
+  await sendMessage(chatId, message, "Markdown");
 }
 
-async function handleProjectInfo(chatId, args, userId, kv) {
+async function handleInfo(chatId, args, userId, kv) {
   if (args.length < 1) {
-    await sendMessage(chatId, "Usage: /info <name>");
+    await sendMessage(chatId, "❌ Usage: /info <uuid>");
     return;
   }
-  const data = await kv.get(`user:${userId}:project:${args[0]}`);
-  if (!data.value) {
-    await sendMessage(chatId, "Project not found");
+  
+  const uuid = args[0];
+  if (!isValidUUID(uuid)) {
+    await sendMessage(chatId, "❌ Invalid UUID format");
     return;
   }
-  const p = JSON.parse(data.value);
-  const vlessUri = `vless://${p.uuid}@${p.projectName}.deno.dev:443?encryption=none&security=tls&sni=${p.projectName}.deno.dev&fp=randomized&type=ws&host=${p.projectName}.deno.dev&path=%2F%3Fed%3D2048#User`;
-  await sendMessage(chatId, `📁 *${p.projectName}*
-UUID: \`${p.uuid}\`
-URL: ${p.url}
-Config: ${p.configUrl}
-Created: ${new Date(p.createdAt).toLocaleString()}
-VLESS: \`${vlessUri}\``, "Markdown");
+  
+  const config = await getConfigByUuid(uuid, kv);
+  if (!config) {
+    await sendMessage(chatId, "❌ Config not found");
+    return;
+  }
+  
+  if (config.ownerId !== userId && userId !== OWNER_ID) {
+    await sendMessage(chatId, "❌ You don't own this config");
+    return;
+  }
+  
+  const message = formatConfigMessage(config, DENO_DOMAIN);
+  await sendMessage(chatId, message, "Markdown");
 }
 
-async function handleDeleteProject(chatId, args, userId, kv) {
+async function handleDelete(chatId, args, userId, kv) {
   if (args.length < 1) {
-    await sendMessage(chatId, "Usage: /delete <name>");
+    await sendMessage(chatId, "❌ Usage: /delete <uuid>");
     return;
   }
-  const data = await kv.get(`user:${userId}:project:${args[0]}`);
-  if (!data.value) {
-    await sendMessage(chatId, "Project not found");
+  
+  const uuid = args[0];
+  if (!isValidUUID(uuid)) {
+    await sendMessage(chatId, "❌ Invalid UUID format");
     return;
   }
-  await deleteUserProject(userId, args[0], kv);
-  await sendMessage(chatId, `✅ Deleted ${args[0]}`);
+  
+  const config = await getConfigByUuid(uuid, kv);
+  if (!config) {
+    await sendMessage(chatId, "❌ Config not found");
+    return;
+  }
+  
+  if (config.ownerId !== userId && userId !== OWNER_ID) {
+    await sendMessage(chatId, "❌ You don't own this config");
+    return;
+  }
+  
+  await deleteConfig(uuid, kv);
+  await sendMessage(chatId, `✅ Config "${config.name}" has been deleted`);
 }
 
+// ===== Owner Commands =====
 async function handleAddUser(chatId, args, userId, kv) {
   if (userId !== OWNER_ID) {
-    await sendMessage(chatId, "Owner only");
+    await sendMessage(chatId, "❌ Only owner can use this command");
     return;
   }
+  
   if (args.length < 1) {
-    await sendMessage(chatId, "Usage: /adduser <id>");
+    await sendMessage(chatId, "❌ Usage: /adduser <telegram_id>");
     return;
   }
-  const target = parseInt(args[0]);
-  if (isNaN(target)) {
-    await sendMessage(chatId, "Invalid ID");
+  
+  const targetUserId = parseInt(args[0]);
+  if (isNaN(targetUserId)) {
+    await sendMessage(chatId, "❌ Invalid user ID");
     return;
   }
-  await addAllowedUser(target, kv);
-  await sendMessage(chatId, `✅ Added user ${target}`);
-  await sendMessage(target, "🎉 Authorized! Use /start");
+  
+  await addAllowedUser(targetUserId, kv);
+  await sendMessage(chatId, `✅ User ${targetUserId} has been added`);
+  
+  // Notify the user
+  await sendMessage(targetUserId, "🎉 You have been authorized to use this bot!\nUse /start to begin.");
 }
 
 async function handleRemoveUser(chatId, args, userId, kv) {
   if (userId !== OWNER_ID) {
-    await sendMessage(chatId, "Owner only");
+    await sendMessage(chatId, "❌ Only owner can use this command");
     return;
   }
+  
   if (args.length < 1) {
-    await sendMessage(chatId, "Usage: /removeuser <id>");
+    await sendMessage(chatId, "❌ Usage: /removeuser <telegram_id>");
     return;
   }
-  const target = parseInt(args[0]);
-  if (isNaN(target)) {
-    await sendMessage(chatId, "Invalid ID");
+  
+  const targetUserId = parseInt(args[0]);
+  if (isNaN(targetUserId)) {
+    await sendMessage(chatId, "❌ Invalid user ID");
     return;
   }
-  await removeAllowedUser(target, kv);
-  await sendMessage(chatId, `✅ Removed user ${target}`);
+  
+  await removeAllowedUser(targetUserId, kv);
+  await sendMessage(chatId, `✅ User ${targetUserId} has been removed`);
 }
 
 async function handleListUsers(chatId, userId, kv) {
   if (userId !== OWNER_ID) {
-    await sendMessage(chatId, "Owner only");
+    await sendMessage(chatId, "❌ Only owner can use this command");
     return;
   }
+  
   const users = await getAllowedUsers(kv);
-  let msg = `👑 Owner: ${OWNER_ID}\n\n`;
-  if (users.length) {
-    msg += "*Allowed:*\n" + users.map(u => `• ${u}`).join("\n");
+  let message = "*👥 Authorized Users:*\n\n";
+  message += `👑 Owner: ${OWNER_ID}\n\n`;
+  
+  if (users.length > 0) {
+    message += "*Allowed Users:*\n";
+    for (const uid of users) {
+      message += `• ${uid}\n`;
+    }
   } else {
-    msg += "No additional users";
+    message += "No additional users added.";
   }
-  await sendMessage(chatId, msg, "Markdown");
+  
+  await sendMessage(chatId, message, "Markdown");
 }
 
-// Main Handler
+async function handleBroadcast(chatId, args, userId, kv) {
+  if (userId !== OWNER_ID) {
+    await sendMessage(chatId, "❌ Only owner can use this command");
+    return;
+  }
+  
+  if (args.length < 1) {
+    await sendMessage(chatId, "❌ Usage: /broadcast <message>");
+    return;
+  }
+  
+  const message = args.join(" ");
+  const users = await getAllowedUsers(kv);
+  users.push(OWNER_ID);
+  
+  let success = 0;
+  let failed = 0;
+  
+  for (const uid of users) {
+    try {
+      await sendMessage(uid, `📢 *Announcement:*\n\n${message}`, "Markdown");
+      success++;
+    } catch (e) {
+      failed++;
+    }
+    await new Promise(r => setTimeout(r, 50)); // rate limit
+  }
+  
+  await sendMessage(chatId, `✅ Broadcast sent!\n📨 Success: ${success}\n❌ Failed: ${failed}`);
+}
+
+// ===== Main Handler =====
 async function handleUpdate(update, kv) {
   if (!update.message) return;
-  const msg = update.message;
-  const chatId = msg.chat.id;
-  const userId = msg.from.id;
-  const text = msg.text || "";
   
+  const message = update.message;
+  const chatId = message.chat.id;
+  const userId = message.from.id;
+  const text = message.text || "";
+  
+  // Check authorization (except /start)
   if (text !== "/start") {
-    if (!(await isAuthorized(userId, kv))) {
-      await sendMessage(chatId, "❌ Not authorized. Contact owner.");
+    const authorized = await isAuthorized(userId, kv);
+    if (!authorized) {
+      await sendMessage(chatId, "❌ You are not authorized to use this bot.\nContact the owner for access.");
       return;
     }
   }
   
   const parts = text.split(" ");
-  const cmd = parts[0].toLowerCase();
+  const command = parts[0].toLowerCase();
   const args = parts.slice(1);
   
-  switch (cmd) {
-    case "/start": await handleStart(chatId); break;
-    case "/new": await handleNewProject(chatId, args, userId, kv); break;
-    case "/list": await handleListProjects(chatId, userId, kv); break;
-    case "/info": await handleProjectInfo(chatId, args, userId, kv); break;
-    case "/delete": await handleDeleteProject(chatId, args, userId, kv); break;
-    case "/adduser": await handleAddUser(chatId, args, userId, kv); break;
-    case "/removeuser": await handleRemoveUser(chatId, args, userId, kv); break;
-    case "/users": await handleListUsers(chatId, userId, kv); break;
-    default: await sendMessage(chatId, "Unknown command. Use /start");
+  switch (command) {
+    case "/start":
+      await handleStart(chatId, kv);
+      break;
+    case "/new":
+      await handleNewConfig(chatId, args, userId, kv);
+      break;
+    case "/list":
+      await handleListConfigs(chatId, userId, kv);
+      break;
+    case "/info":
+      await handleInfo(chatId, args, userId, kv);
+      break;
+    case "/delete":
+      await handleDelete(chatId, args, userId, kv);
+      break;
+    case "/adduser":
+      await handleAddUser(chatId, args, userId, kv);
+      break;
+    case "/removeuser":
+      await handleRemoveUser(chatId, args, userId, kv);
+      break;
+    case "/users":
+      await handleListUsers(chatId, userId, kv);
+      break;
+    case "/broadcast":
+      await handleBroadcast(chatId, args, userId, kv);
+      break;
+    default:
+      await sendMessage(chatId, "❌ Unknown command. Use /start to see available commands.");
   }
 }
 
-// Cloudflare Worker Entry Point
+// ===== Cloudflare Worker Entry Point =====
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     
+    // Webhook endpoint
     if (url.pathname === "/webhook" && request.method === "POST") {
-      await handleUpdate(await request.json(), env.GCP_DENO_KV);
+      const update = await request.json();
+      await handleUpdate(update, env.GCP_DENO_KV);
       return new Response("OK", { status: 200 });
     }
     
+    // Set webhook endpoint
     if (url.pathname === "/setwebhook") {
       const webhookUrl = `https://${url.hostname}/webhook`;
-      const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook?url=${webhookUrl}`);
-      return new Response(JSON.stringify(await res.json()), {
+      const response = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook?url=${webhookUrl}`);
+      const result = await response.json();
+      return new Response(JSON.stringify(result), {
         headers: { "Content-Type": "application/json" }
       });
     }
     
+    // Health check
     if (url.pathname === "/") {
-      return new Response("GCP Deno Bot is running! Created by မောင်သုည");
+      return new Response("GCP Deno Bot is running! Created by မောင်သုည", { status: 200 });
     }
     
     return new Response("Not found", { status: 404 });
