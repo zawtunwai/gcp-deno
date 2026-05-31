@@ -1,0 +1,120 @@
+// ========================
+// GCP Deno Bot - WITH NEW TOKEN
+// ========================
+
+const BOT_TOKEN = "7994671325:AAH4AwA-vcKj5KVbyYH1ljpNWMSE9QxQkMc";
+const OWNER_ID = 7576434717;
+const DENO_API_TOKEN = "ddo_FmjC6WLbbaHAIpsxdgixwzbIicEdWepfrbpm";
+const DENO_ORGANIZATION = "zawtunwai";
+
+async function sendMessage(chatId, text, parseMode = null) {
+  const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
+  const body = { chat_id: chatId, text: text, disable_web_page_preview: true };
+  if (parseMode) body.parse_mode = parseMode;
+  await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+}
+
+function generateUUID() { return crypto.randomUUID(); }
+function generateProjectName(baseName) {
+  const cleanName = baseName.toLowerCase().replace(/[^a-z0-9-]/g, "");
+  return `${cleanName}-${Math.random().toString(36).substring(2, 6)}`;
+}
+
+function stringToBase64(str) {
+  const encoder = new TextEncoder();
+  const encoded = encoder.encode(str);
+  let binary = '';
+  for (let i = 0; i < encoded.length; i++) binary += String.fromCharCode(encoded[i]);
+  return btoa(binary);
+}
+
+async function createDenoProject(projectName) {
+  const url = `https://api.deno.com/v1/organizations/${DENO_ORGANIZATION}/projects`;
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${DENO_API_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ name: projectName })
+  });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
+function getMainTemplate(uuid, credit) {
+  return `Deno.serve(async (request) => {
+  const url = new URL(request.url);
+  const userID = Deno.env.get('UUID') || '${uuid}';
+  const credit = Deno.env.get('CREDIT') || '${credit}';
+  if (url.pathname === '/') return new Response('🚀 Deno Proxy Online');
+  if (url.pathname === '/' + userID) {
+    const vless = \`vless://\${userID}@\${url.hostname}:443?encryption=none&security=tls&sni=\${url.hostname}&type=ws&path=%2F%3Fed%3D2048#\${credit}\`;
+    return new Response(vless);
+  }
+  return new Response('Not Found', { status: 404 });
+});`;
+}
+
+// In-memory storage (simplified - upgrade to KV later)
+let userProjects = {};
+
+async function handleStart(chatId) {
+  await sendMessage(chatId, "🚀 *Deno Bot Ready!*\n\n/new <name> - Create project\n/list - List projects", "Markdown");
+}
+
+async function handleNewProject(chatId, args, userId) {
+  if (args.length < 1) {
+    await sendMessage(chatId, "❌ Usage: /new <projectName>\nExample: /new myserver");
+    return;
+  }
+  const projectName = generateProjectName(args[0]);
+  await sendMessage(chatId, "🔄 Creating project... (30 sec)");
+  try {
+    const uuid = generateUUID();
+    const credit = `User-${userId}`;
+    await createDenoProject(projectName);
+    const code = stringToBase64(getMainTemplate(uuid, credit));
+    await fetch(`https://api.deno.com/v1/organizations/${DENO_ORGANIZATION}/projects/${projectName}/deployments`, {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${DENO_API_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ entrypoint: "main.ts", assets: { "main.ts": { kind: "file", content: code, encoding: "base64" } }, envVars: { "UUID": uuid, "CREDIT": credit } })
+    });
+    if (!userProjects[userId]) userProjects[userId] = [];
+    userProjects[userId].push({ projectName, uuid, url: `https://${projectName}.deno.dev` });
+    const vlessUri = `vless://${uuid}@${projectName}.deno.dev:443?encryption=none&security=tls&sni=${projectName}.deno.dev&type=ws&path=%2F%3Fed%3D2048#${credit}`;
+    await sendMessage(chatId, `✅ *Created!*\n\n📁 ${projectName}.deno.dev/${uuid}\n\n🔑 \`${vlessUri}\``, "Markdown");
+  } catch (e) { await sendMessage(chatId, `❌ Error: ${e.message}`); }
+}
+
+async function handleListProjects(chatId, userId) {
+  const projects = userProjects[userId] || [];
+  if (projects.length === 0) { await sendMessage(chatId, "📭 No projects yet."); return; }
+  let msg = "*📋 Your Projects:*\n";
+  projects.forEach(p => { msg += `\n📁 ${p.projectName}\n${p.url}\n`; });
+  await sendMessage(chatId, msg, "Markdown");
+}
+
+async function handleUpdate(update) {
+  const msg = update.message;
+  if (!msg) return;
+  const chatId = msg.chat.id, userId = msg.from.id, text = msg.text || "";
+  if (userId !== OWNER_ID && text !== "/start") { await sendMessage(chatId, "❌ Unauthorized"); return; }
+  const parts = text.split(" "), cmd = parts[0].toLowerCase(), args = parts.slice(1);
+  if (cmd === "/start") await handleStart(chatId);
+  else if (cmd === "/new") await handleNewProject(chatId, args, userId);
+  else if (cmd === "/list") await handleListProjects(chatId, userId);
+  else await sendMessage(chatId, "❌ Unknown command. Use /start");
+}
+
+export default {
+  async fetch(request) {
+    const url = new URL(request.url);
+    if (url.pathname === "/webhook" && request.method === "POST") {
+      await handleUpdate(await request.json());
+      return new Response("OK");
+    }
+    if (url.pathname === "/setwebhook") {
+      const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook?url=https://${url.hostname}/webhook`);
+      return new Response(JSON.stringify(await res.json()));
+    }
+    return new Response("Bot running");
+  }
+};
